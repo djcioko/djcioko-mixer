@@ -1,75 +1,92 @@
 import streamlit as st
 import librosa
 import numpy as np
-import pandas as pd
 import soundfile as sf
 import os
+import subprocess
 
-st.set_page_config(page_title="DJCIOKO MIXER", page_icon="🎧")
+st.set_page_config(page_title="DJCIOKO MEGA-MIXER", layout="wide")
+st.title("🎧 DJCIOKO - TikTok Video Mixer")
 
-st.title("🎧 DJCIOKO - TikTok MegaMixer")
-st.markdown("### Mixare automată pe refren & Sortare BPM")
-
-# Reținem fișierele în sesiune (conform cerinței tale)
 if 'tracks' not in st.session_state:
     st.session_state.tracks = []
 
-uploaded_files = st.file_uploader("Încarcă melodiile (Bulk Upload)", type=['mp3', 'wav'], accept_multiple_files=True)
+# 1. UPLOAD
+files = st.file_uploader("Urci cele 10 melodii aici:", type=['mp3', 'wav'], accept_multiple_files=True)
+foto = st.file_uploader("🖼️ Urci poza pentru TikTok aici:", type=['jpg', 'png', 'jpeg'])
 
-if uploaded_files:
-    if st.button("🔍 Analizează și Sortează"):
-        results = []
-        progress_bar = st.progress(0)
+if files and st.button("🔍 ANALIZEAZĂ ȘI PREGĂTEȘTE MIX"):
+    results = []
+    for f in files:
+        # Forțăm încărcarea întregii piese pentru a nu rata refrenul
+        y, sr = librosa.load(f, sr=44100)
+        tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
         
-        for i, file in enumerate(uploaded_files):
-            # Analiză tehnică
-            y, sr = librosa.load(file, duration=120)
-            tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-            
-            # Detecție Refren (Peak Energy)
-            energy = librosa.feature.rms(y=y)[0]
-            duration_30s = int(30 * sr / 512)
-            max_idx = np.argmax([np.mean(energy[j:j+duration_30s]) for j in range(len(energy)-duration_30s)])
+        # Găsim refrenul (căutăm cea mai zgomotoasă parte)
+        energy = librosa.feature.rms(y=y)[0]
+        duration_30s = int(30 * sr / 512)
+        if len(energy) > duration_30s:
+            max_idx = np.argmax([np.mean(energy[i:i+duration_30s]) for i in range(len(energy)-duration_30s)])
             start_sec = (max_idx * 512) / sr
+        else:
+            start_sec = 0
             
-            results.append({
-                "Nume": file.name,
-                "BPM": round(float(tempo), 1),
-                "Start Refren (s)": round(start_sec, 2),
-                "raw_data": y,
-                "sr": sr
-            })
-            progress_bar.progress((i + 1) / len(uploaded_files))
-        
-        # Sortare automată BPM crescător
-        st.session_state.tracks = sorted(results, key=lambda x: x['BPM'])
+        results.append({
+            "Nume": f.name,
+            "BPM": round(float(tempo), 1),
+            "Start": start_sec,
+            "audio": y,
+            "sr": sr
+        })
+    
+    # SORTARE AUTOMATĂ BPM: MIC -> MARE
+    st.session_state.tracks = sorted(results, key=lambda x: x['BPM'])
+    st.success(f"✅ Am pregătit {len(st.session_state.tracks)} piese în ordine crescătoare!")
 
+# 2. AFIȘARE TABEL
 if st.session_state.tracks:
-    st.write("### ✅ Ordine Mixare (Tempo Scăzut -> Crescător)")
-    df = pd.DataFrame(st.session_state.tracks)[["Nume", "BPM", "Start Refren (s)"]]
-    st.table(df)
+    df_display = pd.DataFrame(st.session_state.tracks)[["Nume", "BPM", "Start"]]
+    st.table(df_display)
 
-    if st.button("🚀 GENEREAZĂ MIX FINAL"):
+    # 3. BUTON MIX NOW (AUDIO + VIDEO)
+    if st.button("🚀 MIX NOW & GENERATE VIDEO"):
         mix_final = []
         sr_mix = 44100
         
         for piesa in st.session_state.tracks:
-            # Tăiem 30 de secunde exact de la refren
-            start_f = int(piesa['Start Refren (s)'] * sr_mix)
-            end_f = start_f + (30 * sr_mix)
-            segment = piesa['raw_data'][start_f:end_f]
+            s_idx = int(piesa['Start'] * sr_mix)
+            e_idx = s_idx + (30 * sr_mix) # Tăiem FIX 30 de secunde
             
-            # Cut Fader (0.1s fade)
-            fade = int(0.1 * sr_mix)
+            segment = piesa['audio'][s_idx:e_idx]
+            
+            # Dacă piesa e mai scurtă de 30s, o luăm pe toată
+            if len(segment) < (30 * sr_mix):
+                segment = piesa['audio'][:int(30 * sr_mix)]
+
+            # Crossfade rapid (0.2s)
+            fade = int(0.2 * sr_mix)
             if len(segment) > fade:
                 segment[:fade] *= np.linspace(0, 1, fade)
                 segment[-fade:] *= np.linspace(1, 0, fade)
             
             mix_final.extend(segment)
+            
+        # Salvare Audio Temporar
+        audio_path = "temp_mix.mp3"
+        sf.write(audio_path, np.array(mix_final), sr_mix)
         
-        # Salvare buffer
-        nume_iesire = "DJCIOKO_MIX_TIKTOK.mp3"
-        sf.write(nume_iesire, np.array(mix_final), sr_mix)
-        
-        with open(nume_iesire, "rb") as f:
-            st.download_button("⬇️ DESCARCĂ MIXUL", f, file_name=nume_iesire)
+        if foto:
+            # Salvare poză temporară
+            with open("temp_img.jpg", "wb") as img_file:
+                img_file.write(foto.getbuffer())
+            
+            # COMANDA FFMEG PENTRU VIDEO (Poza + Audio)
+            video_path = "DJCIOKO_VIDEO.mp4"
+            cmd = f"ffmpeg -y -loop 1 -i temp_img.jpg -i {audio_path} -c:v libx264 -tune stillimage -c:a aac -b:a 192k -pix_fmt yuv420p -shortest {video_path}"
+            subprocess.run(cmd, shell=True)
+            
+            with open(video_path, "rb") as v:
+                st.download_button("⬇️ DESCARCĂ VIDEO TIKTOK", v, file_name="DJCIOKO_FINAL.mp4")
+        else:
+            with open(audio_path, "rb") as a:
+                st.download_button("⬇️ DESCARCĂ DOAR AUDIO", a, file_name="DJCIOKO_MIX.mp3")
