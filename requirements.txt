@@ -1,1 +1,5 @@
-streamlit, librosa, numpy, pandas, soundfile.
+streamlit
+librosa
+numpy
+pandas
+soundfile
