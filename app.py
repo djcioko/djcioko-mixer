@@ -5,76 +5,89 @@ import pandas as pd
 import soundfile as sf
 import os
 
-st.set_page_config(page_title="DJCIOKO AUDIO MIXER", layout="wide")
-st.title("🎧 DJCIOKO - TikTok Audio Mixer")
+st.set_page_config(page_title="DJCIOKO AUTO CUT", layout="wide")
+st.title("🎧 DJCIOKO - AUTO CUT MIX DJ (30s + Smooth Transitions)")
 
-# Resetăm fișierele temporare la pornire
 if 'tracks' not in st.session_state:
     st.session_state.tracks = []
 
-# --- PASUL 1: ÎNCĂRCARE ---
-st.header("1. Încarcă melodiile (MP3/WAV)")
-uploaded_files = st.file_uploader("Trage cele 10 melodii aici:", type=['mp3', 'wav'], accept_multiple_files=True)
+# --- 1. UPLOAD ---
+st.subheader("🎵 Pasul 1: Încarcă melodiile")
+files = st.file_uploader("Alege piesele:", type=['mp3', 'wav'], accept_multiple_files=True)
 
-# --- PASUL 2: ANALIZĂ ȘI SORTARE ---
-if uploaded_files:
-    if st.button("🔍 ANALIZEAZĂ ȘI SORTEAZĂ DUPĂ BPM"):
-        all_results = []
-        p_bar = st.progress(0)
-        
-        for i, f in enumerate(uploaded_files):
-            # Salvare fizică pe disk pentru a preveni erorile de citire
-            with open(f.name, "wb") as tmp_file:
-                tmp_file.write(f.getbuffer())
+# --- 2. ANALIZĂ ---
+if files:
+    if st.button("🔍 ANALIZEAZĂ ȘI SORTEAZĂ BPM"):
+        results = []
+        status = st.empty()
+        for f in files:
+            status.text(f"Se analizează: {f.name}...")
+            with open(f.name, "wb") as tmp:
+                tmp.write(f.getbuffer())
             
-            # Analiză BPM
-            y, sr = librosa.load(f.name, sr=22050, duration=60)
+            y, sr = librosa.load(f.name, sr=22050, duration=45)
             tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
             
-            # Păstrăm informațiile pentru mix
-            all_results.append({
-                "Nume": f.name,
+            results.append({
+                "Melodie": f.name,
                 "BPM": round(float(tempo), 1),
-                "path": f.name
+                "file_path": f.name
             })
-            p_bar.progress((i + 1) / len(uploaded_files))
         
-        # Sortare automată: BPM mic -> BPM mare
-        st.session_state.tracks = sorted(all_results, key=lambda x: x['BPM'])
-        st.success("✅ Analiza este gata!")
+        st.session_state.tracks = sorted(results, key=lambda x: x['BPM'])
+        status.success("✅ Analiză gata! Volumul și tranzițiile sunt pregătite.")
 
-# --- PASUL 3: AFIȘARE ȘI DESCĂRCARE ---
+# --- 3. MIXARE CU CROSSFADE ȘI NORMALIZARE ---
 if st.session_state.tracks:
-    st.write("### Ordinea melodiilor în mix:")
-    st.table(pd.DataFrame(st.session_state.tracks)[["Nume", "BPM"]])
+    st.table(pd.DataFrame(st.session_state.tracks)[["Melodie", "BPM"]])
     
-    if st.button("🚀 GENEREAZĂ MIXUL (MP3)"):
-        with st.spinner("Se creează mixul de 30s per piesă..."):
-            mix_audio = []
+    if st.button("🚀 GENEREAZĂ MIXUL PROFESIONAL"):
+        with st.spinner("Se uniformizează volumul și se aplică crossfade..."):
             sr_mix = 44100
+            crossfade_sec = 2 # Durata tranziției în secunde
+            segment_duration = 30 # Durata fiecărei piese
             
-            for piesa in st.session_state.tracks:
-                # Încărcăm fix 30 secunde
-                # Începem de la secunda 30 (unde e de obicei refrenul) sau de la 0 dacă e scurtă
-                y, _ = librosa.load(piesa['path'], sr=sr_mix, offset=0, duration=30)
+            final_mix = np.array([], dtype=np.float32)
+            
+            for i, t in enumerate(st.session_state.tracks):
+                # Încărcăm piesa
+                y, _ = librosa.load(t['file_path'], sr=sr_mix, duration=segment_duration)
                 
-                # Crossfade scurt să sune bine
-                fade = int(0.5 * sr_mix)
-                if len(y) > fade:
-                    y[:fade] *= np.linspace(0, 1, fade)
-                    y[-fade:] *= np.linspace(1, 0, fade)
+                # --- NORMALIZARE VOLUM ---
+                # Aduce volumul la un nivel standard de -20dB RMS aproximativ
+                rms = np.sqrt(np.mean(y**2))
+                if rms > 0:
+                    y = y * (0.15 / rms)
                 
-                mix_audio.extend(y)
+                # --- LOGICĂ CROSSFADE ---
+                fade_samples = int(crossfade_sec * sr_mix)
+                
+                # Creăm curbele de fade
+                fade_in = np.linspace(0, 1, fade_samples)
+                fade_out = np.linspace(1, 0, fade_samples)
+                
+                if i == 0:
+                    # Prima piesă: doar adăugăm
+                    final_mix = y
+                else:
+                    # Suprapunem sfârșitul mixului actual cu începutul piesei noi
+                    overlap_start = len(final_mix) - fade_samples
+                    
+                    # Aplicăm fade-out pe finalul mixului existent
+                    final_mix[overlap_start:] *= fade_out
+                    
+                    # Aplicăm fade-in pe începutul piesei noi
+                    new_segment_start = y[:fade_samples] * fade_in
+                    
+                    # Combinăm (Mixăm) cele două părți
+                    final_mix[overlap_start:] += new_segment_start
+                    
+                    # Adăugăm restul piesei noi (după zona de fade)
+                    final_mix = np.concatenate([final_mix, y[fade_samples:]])
             
-            # Salvare fișier final
-            nume_iesire = "DJCIOKO_MIX_FINAL.mp3"
-            sf.write(nume_iesire, np.array(mix_audio), sr_mix)
+            # Salvare finală
+            iesire = "DJCIOKO_PRO_MIX.mp3"
+            sf.write(iesire, final_mix, sr_mix)
             
-            # Butonul de download
-            with open(nume_iesire, "rb") as final_file:
-                st.download_button(
-                    label="⬇️ DESCARCĂ MIXUL DJCIOKO (MP3)",
-                    data=final_file,
-                    file_name=nume_iesire,
-                    mime="audio/mpeg"
-                )
+            with open(iesire, "rb") as final:
+                st.download_button("⬇️ DESCARCĂ MIXUL PRO (MP3)", data=final, file_name=iesire)
