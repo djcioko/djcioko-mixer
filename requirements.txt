@@ -3,4 +3,3 @@ librosa
 numpy
 pandas
 soundfile
-pydub
