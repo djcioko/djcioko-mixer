@@ -5,110 +5,113 @@ import pandas as pd
 import soundfile as sf
 import os
 
-st.set_page_config(page_title="SmartMix Pro V3.6", layout="wide")
-st.title("🎧 SmartMix Pro - Expert Manual Control")
+st.set_page_config(page_title="SmartMix Pro V3.7", layout="wide")
+st.title("🎧 SmartMix Pro - Manual Arrangement Studio")
 
 if 'tracks' not in st.session_state:
     st.session_state.tracks = []
 
-def get_pro_start(path):
-    y, sr = librosa.load(path, sr=22050, duration=60)
+# --- ANALIZĂ ---
+def analyze_track(path):
+    y, sr = librosa.load(path, sr=22050, duration=45)
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
     rmse = librosa.feature.rms(y=y)[0]
     start_s = librosa.frames_to_time(np.where(rmse > np.mean(rmse)*1.3)[0][0]) if any(rmse > np.mean(rmse)*1.3) else 0
     return round(float(tempo), 1), round(float(start_s), 2)
 
-# --- SIDEBAR CONFIG ---
+# --- SIDEBAR ---
 st.sidebar.header("🚀 Setări Mix")
-durata_globala = st.sidebar.slider("Durată piese (sec):", 30, 600, 120)
-cf_global = st.sidebar.slider("Crossfade (sec):", 2, 15, 5)
-format_export = st.sidebar.selectbox("Format:", ["WAV", "MP3 320kbps"])
+durata_def = st.sidebar.number_input("Durată standard piese (sec):", 30, 600, 120)
+cf_sec = st.sidebar.slider("Crossfade (sec):", 2, 15, 5)
+fmt_out = st.sidebar.selectbox("Format:", ["WAV", "MP3 320kbps"])
 
+# --- UPLOAD ---
 files = st.file_uploader("Încarcă muzica:", type=['mp3', 'wav'], accept_multiple_files=True)
 
 if files:
-    if st.button("🔍 ANALIZEAZĂ ȘI ADAUGĂ"):
-        results = []
+    if st.button("🔍 ANALIZEAZĂ PIESELE"):
         for f in files:
-            if f.name.startswith("._"): continue
+            if any(t['Piesa'] == f.name for t in st.session_state.tracks): continue
             with open(f.name, "wb") as tmp:
                 tmp.write(f.getbuffer())
             try:
-                bpm, s_start = get_pro_start(f.name)
-                # Adăugăm un index de ordine (poziție)
-                results.append({
-                    "Ordine": len(st.session_state.tracks) + len(results) + 1,
-                    "Piesa": f.name, 
-                    "BPM": bpm, 
-                    "Start (sec)": s_start, 
-                    "Durata (sec)": float(durata_globala),
-                    "path": f.name
+                bpm, s_start = analyze_track(f.name)
+                st.session_state.tracks.append({
+                    "Piesa": f.name, "BPM": bpm, "Start (sec)": s_start, "Durata (sec)": float(durata_def)
                 })
             except:
-                results.append({"Ordine": 99, "Piesa": f.name, "BPM": 120.0, "Start (sec)": 0.0, "Durata (sec)": float(durata_globala), "path": f.name})
-        st.session_state.tracks.extend(results)
-
-if st.session_state.tracks:
-    st.markdown("### ⚙️ Tabel Editabil: Schimbă 'Ordine' pentru a rearanja manual")
-    
-    # Afișăm tabelul editabil
-    df_disp = pd.DataFrame(st.session_state.tracks).drop(columns=['path'])
-    
-    edited_df = st.data_editor(
-        df_disp, 
-        num_rows="dynamic", 
-        key="v36_editor",
-        column_config={
-            "Ordine": st.column_config.NumberColumn("Poz.", format="%d", help="Schimbă numărul pentru a muta piesa în mix"),
-            "BPM": st.column_config.NumberColumn("BPM", format="%.1f"),
-            "Start (sec)": st.column_config.NumberColumn("Start (sec)", format="%.2f"),
-            "Durata (sec)": st.column_config.NumberColumn("Durata (sec)", format="%d")
-        }
-    )
-
-    # Re-sortăm automat session_state bazat pe ce a scris utilizatorul în coloana "Ordine"
-    if st.button("🔄 ACTUALIZEAZĂ ORDINEA"):
-        st.session_state.tracks = []
-        # Reconstruim lista bazată pe noul tabel editat
-        for _, row in edited_df.sort_values(by="Ordine").iterrows():
-            # Căutăm path-ul în fișierele de pe disc (după nume)
-            st.session_state.tracks.append({
-                "Ordine": row["Ordine"],
-                "Piesa": row["Piesa"],
-                "BPM": row["BPM"],
-                "Start (sec)": row["Start (sec)"],
-                "Durata (sec)": row["Durata (sec)"],
-                "path": row["Piesa"] 
-            })
-        st.success("Ordinea a fost salvată! Mixul va respecta numerele de la 1 la X.")
+                st.session_state.tracks.append({
+                    "Piesa": f.name, "BPM": 120.0, "Start (sec)": 0.0, "Durata (sec)": float(durata_def)
+                })
         st.rerun()
 
+# --- GESTIONARE ORDINE ---
+if st.session_state.tracks:
+    st.markdown("### 📋 Lista de Mixaj (Aranjează Ordinea)")
+    
+    # Butoane Sortare BPM
+    c1, c2, c3 = st.columns([1.5, 1.5, 4])
+    if c1.button("📉 Sortează BPM (Mic-Mare)"):
+        st.session_state.tracks = sorted(st.session_state.tracks, key=lambda x: x['BPM'])
+        st.rerun()
+    if c2.button("📈 Sortează BPM (Mare-Mic)"):
+        st.session_state.tracks = sorted(st.session_state.tracks, key=lambda x: x['BPM'], reverse=True)
+        st.rerun()
+    if c3.button("🗑️ Golește Lista"):
+        st.session_state.tracks = []
+        st.rerun()
+
+    # Afișare rând cu rând cu butoane de mutare
+    new_order = []
+    for i, track in enumerate(st.session_state.tracks):
+        col_move, col_info, col_edit = st.columns([1, 4, 3])
+        
+        # Butoane Mutare
+        with col_move:
+            btn_up = st.button("🔼", key=f"up_{i}")
+            btn_down = st.button("🔽", key=f"down_{i}")
+            
+            if btn_up and i > 0:
+                st.session_state.tracks[i], st.session_state.tracks[i-1] = st.session_state.tracks[i-1], st.session_state.tracks[i]
+                st.rerun()
+            if btn_down and i < len(st.session_state.tracks) - 1:
+                st.session_state.tracks[i], st.session_state.tracks[i+1] = st.session_state.tracks[i+1], st.session_state.tracks[i]
+                st.rerun()
+        
+        # Informații
+        with col_info:
+            st.markdown(f"**{i+1}. {track['Piesa']}**")
+            st.caption(f"BPM: {track['BPM']} | Start sugerat: {track['Start (sec)']}s")
+            
+        # Editare Manuală
+        with col_edit:
+            new_start = st.number_input("Start (s)", value=track['Start (sec)'], key=f"s_{i}", step=0.1)
+            new_dur = st.number_input("Durată (s)", value=track['Durata (sec)'], key=f"d_{i}", step=1.0)
+            st.session_state.tracks[i]['Start (sec)'] = new_start
+            st.session_state.tracks[i]['Durata (sec)'] = new_dur
+
+    st.markdown("---")
     if st.button("🚀 GENEREAZĂ MIXUL FINAL"):
         try:
-            with st.spinner("Mixare în progres conform ordinii tale manuale..."):
+            with st.spinner("Mixare profesională în curs..."):
                 sr_mix = 44100
                 final = np.array([], dtype=np.float32)
                 
-                # Sortăm tabelul după coloana 'Ordine' înainte de procesare
-                final_queue = edited_df.sort_values(by="Ordine")
-                
-                for i, row in final_queue.iterrows():
+                for i, row in enumerate(st.session_state.tracks):
                     y, _ = librosa.load(row['Piesa'], sr=sr_mix, offset=float(row['Start (sec)']), duration=float(row['Durata (sec)']))
                     y = librosa.util.normalize(y) * 0.95
+                    f_len = int(cf_sec * sr_mix)
                     
-                    f_samples = int(cf_global * sr_mix)
-                    if i == 0 or len(final) == 0:
+                    if i == 0:
                         final = y
                     else:
-                        out_fade = final[-f_samples:] * np.linspace(1, 0, f_samples)
-                        in_fade = y[:f_samples] * np.linspace(0, 1, f_samples)
-                        final[-f_samples:] = out_fade + in_fade
-                        final = np.concatenate([final, y[f_samples:]])
+                        out_f = final[-f_len:] * np.linspace(1, 0, f_len)
+                        in_f = y[:f_len] * np.linspace(0, 1, f_len)
+                        final[-f_len:] = out_f + in_f
+                        final = np.concatenate([final, y[f_len:]])
                 
-                ext = 'mp3' if 'MP3' in format_export else 'wav'
-                out_name = f"SmartMix_Custom_Order.{ext}"
-                
-                if ext == 'mp3':
+                out_name = f"SmartMix_Result.{'mp3' if 'MP3' in fmt_out else 'wav'}"
+                if "MP3" in fmt_out:
                     sf.write("t.wav", final, sr_mix)
                     os.system(f"ffmpeg -i t.wav -ab 320k -y {out_name}")
                 else:
@@ -116,6 +119,6 @@ if st.session_state.tracks:
                 
                 st.audio(out_name)
                 with open(out_name, "rb") as f_res:
-                    st.download_button("⬇️ DESCARCĂ", f_res, file_name=out_name)
+                    st.download_button("⬇️ DESCARCĂ MIXUL", f_res, file_name=out_name)
         except Exception as e:
             st.error(f"Eroare: {e}")
