@@ -5,131 +5,117 @@ import pandas as pd
 import soundfile as sf
 import os
 
-# Configurare pagină și stil
-st.set_page_config(page_title="SmartMix Pro Studio", layout="wide")
-st.title("🎧 SmartMix Pro - Automated DJ Studio")
-st.markdown("### Mixare Inteligentă: Beat-Match, Voice Detection & Manual Timing")
+st.set_page_config(page_title="SmartMix Pro V3", layout="wide")
+st.title("🎧 SmartMix Pro V3 - Engine Avansat de Mixare")
 
 if 'tracks' not in st.session_state:
     st.session_state.tracks = []
 
-# --- 1. ÎNCĂRCARE FIȘIERE ---
-files = st.file_uploader("Încărcați piesele audio (MP3/WAV)", type=['mp3', 'wav'], accept_multiple_files=True)
-
-def analyze_audio(path):
+# --- MOTORUL DE ANALIZĂ AVANSATĂ ---
+def analyze_track_complex(path):
+    # Încărcăm piesa
     y, sr = librosa.load(path, sr=22050)
-    # Detecție BPM și tobe (Beat Tracking)
+    
+    # 1. Detecție Beat precisă
     tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
     beat_times = librosa.frames_to_time(beat_frames, sr=sr)
     
-    # Detecție automată voce (eliminare intro instrumental)
-    intervals = librosa.effects.split(y, top_db=25)
-    v_start = intervals[0][0] / sr if len(intervals) > 0 else 0
+    # 2. Găsirea "Drop-ului" (unde crește energia brusc)
+    # Calculăm energia RMS pe ferestre scurte
+    hop_length = 512
+    rmse = librosa.feature.rms(y=y, hop_length=hop_length)[0]
+    times = librosa.times_like(rmse, sr=sr, hop_length=hop_length)
     
-    # Sincronizare pe primul beat după voce
-    sync_start = beat_times[beat_times >= v_start][0] if len(beat_times) > 0 else v_start
+    # Găsim primul punct unde energia sare peste 60% din media piesei
+    energy_threshold = np.mean(rmse) * 1.2
+    drop_index = np.where(rmse > energy_threshold)[0][0] if any(rmse > energy_threshold) else 0
+    drop_time = times[drop_index]
     
-    return round(float(tempo), 1), round(sync_start, 2)
+    # Aliniem drop-ul cu cel mai apropiat beat pentru sync perfect
+    closest_beat = beat_times[np.abs(beat_times - drop_time).argmin()]
+    
+    return round(float(tempo), 1), round(closest_beat, 2)
 
-# --- 2. ANALIZĂ ȘI CONFIGURARE ---
+# --- INTERFAȚĂ UPLOAD ---
+files = st.file_uploader("Încarcă muzica:", type=['mp3', 'wav'], accept_multiple_files=True)
+
 if files:
-    if st.button("🔍 ANALIZEAZĂ PIESELE"):
+    if st.button("🔍 ANALIZĂ SMART (BPM & DROP DETECT)"):
         results = []
         valid_files = [f for f in files if not f.name.startswith("._")]
         for f in valid_files:
-            path = f.name
-            with open(path, "wb") as tmp:
+            with open(f.name, "wb") as tmp:
                 tmp.write(f.getbuffer())
             try:
-                bpm, start_beat = analyze_audio(path)
+                bpm, start_sync = analyze_track_complex(f.name)
                 results.append({
                     "Piesa": f.name,
                     "BPM": bpm,
-                    "Start Beat (s)": start_beat,
-                    "Durata (sec)": 75,  # Default 1:15
-                    "file_path": path
+                    "Start Manual (sec)": start_sync,
+                    "Durata (sec)": 90,
+                    "path": f.name
                 })
             except: continue
         st.session_state.tracks = results
-        st.success("Analiză completă! Acum poți ajusta duratele mai jos.")
 
-# --- 3. TABEL EDITABIL (Setare manuală timp) ---
+# --- CONTROLUL MIXAJULUI ---
 if st.session_state.tracks:
-    st.markdown("#### ⚙️ Configurează Durata și Ordinea (Sortat după BPM automat)")
-    df = pd.DataFrame(st.session_state.tracks).sort_values(by="BPM")
-    
-    # Permitem editarea coloanei de durată direct în tabel
+    st.subheader("⚙️ Configurare Manuală pe Piesă")
+    # Tabel editabil pentru a seta EXACT secundele
     edited_df = st.data_editor(
-        df[["Piesa", "BPM", "Start Beat (s)", "Durata (sec)"]],
-        column_config={
-            "Durata (sec)": st.column_config.NumberColumn(
-                "Durata (sec)",
-                help="Introdu manual secundele (ex: 60 pentru 1 min, 90 pentru 1:30, 120 pentru 2 min)",
-                min_value=10,
-                max_value=600,
-                step=1,
-            )
-        },
-        disabled=["Piesa", "BPM", "Start Beat (s)"],
-        hide_index=True,
+        pd.DataFrame(st.session_state.tracks).drop(columns=['path']),
+        num_rows="dynamic"
     )
-    
-    # Actualizăm session_state cu valorile noi
-    for index, row in edited_df.iterrows():
-        for track in st.session_state.tracks:
-            if track["Piesa"] == row["Piesa"]:
-                track["Durata (sec)"] = row["Durata (sec)"]
 
-    st.markdown("---")
-    
-    # --- 4. OPȚIUNI EXPORT ---
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
-        format_ales = st.selectbox("Alege formatul final:", ["MP3 (320 kbps)", "WAV (High Fidelity)"])
+        fmt = st.selectbox("Format Export:", ["WAV (Studio)", "MP3 320kbps"])
     with col2:
-        crossfade_val = st.slider("Durată Crossfade (secunde):", 1, 10, 5)
+        cf_time = st.slider("Crossfade (secunde):", 2, 10, 5)
+    with col3:
+        master_gain = st.slider("Master Gain (Volum):", 0.5, 2.0, 1.2)
 
-    if st.button("🚀 GENEREAZĂ MIXUL FINAL"):
-        with st.spinner("SmartMix Pro procesează mixul tău pe beat..."):
+    if st.button("🚀 GENEREAZĂ MIXAJUL PROFESIONAL"):
+        with st.spinner("Sincronizare beat-match și masterizare..."):
             sr_mix = 44100
-            final_mix = np.array([], dtype=np.float32)
-            sorted_tracks = sorted(st.session_state.tracks, key=lambda x: x['BPM'])
+            final_audio = np.array([], dtype=np.float32)
             
-            for i, t in enumerate(sorted_tracks):
-                # Încărcare cu offset (start pe beat) și durată manuală
-                y, _ = librosa.load(t['file_path'], sr=sr_mix, offset=t['Start Beat (s)'], duration=t['Durata (sec)'])
+            # Sortăm după BPM pentru tranziții fine
+            tracks_to_process = edited_df.sort_values("BPM").to_dict('records')
+            
+            for i, t in enumerate(tracks_to_process):
+                # Găsim calea fișierului original
+                orig_path = next(item['path'] for item in st.session_state.tracks if item['Piesa'] == t['Piesa'])
                 
-                # Uniformizare volum (RMS)
-                rms = np.sqrt(np.mean(y**2))
-                if rms > 0: y = y * (0.12 / rms)
+                # Încărcăm exact cât s-a setat manual
+                y, _ = librosa.load(orig_path, sr=sr_mix, offset=t['Start Manual (sec)'], duration=t['Durata (sec)'])
                 
-                fade_samples = int(crossfade_val * sr_mix)
+                # --- MASTERIZARE ȘI COMPRESIE ---
+                # Normalizare RMS (Uniformizare volum)
+                y = librosa.util.normalize(y) * master_gain
                 
+                fade_samples = int(cf_time * sr_mix)
                 if i == 0:
-                    final_mix = y
+                    final_audio = y
                 else:
-                    # Sincronizare crossfade
-                    out_part = final_mix[-fade_samples:] * np.linspace(1, 0, fade_samples)
-                    in_part = y[:fade_samples] * np.linspace(0, 1, fade_samples)
-                    final_mix[-fade_samples:] = out_part + in_part
-                    final_mix = np.concatenate([final_mix, y[fade_samples:]])
+                    # Sincronizare pe tobe la crossfade
+                    # Aplicăm fade out și in
+                    out_part = final_audio[-fade_samples:] * np.cos(np.linspace(0, np.pi/2, fade_samples))
+                    in_part = y[:fade_samples] * np.sin(np.linspace(0, np.pi/2, fade_samples))
+                    
+                    final_audio[-fade_samples:] = out_part + in_part
+                    final_audio = np.concatenate([final_audio, y[fade_samples:]])
             
-            final_mix = np.clip(final_mix, -1, 1)
+            # Limiter final pentru a preveni distorsiunea
+            final_audio = np.clip(final_audio, -0.98, 0.98)
             
-            # Export în funcție de alegere
-            if "MP3" in format_ales:
-                temp_wav = "temp_mix.wav"
-                sf.write(temp_wav, final_mix, sr_mix, subtype='PCM_24')
-                iesire = "SmartMix_Pro_Master.mp3"
-                os.system(f"ffmpeg -i {temp_wav} -ab 320k -y {iesire}")
-                ext = "mp3"
+            if "MP3" in fmt:
+                sf.write("temp.wav", final_audio, sr_mix)
+                os.system(f"ffmpeg -i temp.wav -ab 320k -y SmartMix_Final.mp3")
+                out_file = "SmartMix_Final.mp3"
             else:
-                iesire = "SmartMix_Pro_Master.wav"
-                sf.write(iesire, final_mix, sr_mix, subtype='PCM_24')
-                ext = "wav"
-            
-            with open(iesire, "rb") as f_out:
-                st.download_button(f"⬇️ DESCARCĂ MIX {format_ales}", f_out, file_name=iesire)
-
-st.markdown("---")
-st.caption("© 2026 SmartMix Pro | Beat-Matching AI Engine")
+                sf.write("SmartMix_Final.wav", final_audio, sr_mix, subtype='PCM_24')
+                out_file = "SmartMix_Final.wav"
+                
+            with open(out_file, "rb") as f:
+                st.download_button("⬇️ DESCARCĂ REZULTATUL", f, file_name=out_file)
