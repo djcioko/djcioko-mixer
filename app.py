@@ -6,13 +6,14 @@ import os
 import tempfile
 import unicodedata
 
-st.set_page_config(page_title="SmartMix Pro V4.0", layout="wide")
+st.set_page_config(page_title="SmartMix Pro V4.1", layout="wide")
 st.title("🎧 SmartMix Pro - Manual Arrangement Studio")
 st.caption(
-    "BPM + key/Camelot, comenzi vocale Groq, taiere langa final de fraza, "
-    "crossfade pe masuri, export WAV/MP3."
+    "BPM + key/Camelot, comenzi vocale Groq, taiere pe final de fraza, "
+    "crossfade curat pe masuri (fără căderi de volum), export WAV/MP3."
 )
 
+# Salvarea stării pentru a nu pierde fișierele / setările la refresh
 if "tracks" not in st.session_state:
     st.session_state.tracks = []
 if "ultima_comanda" not in st.session_state:
@@ -176,10 +177,7 @@ def executa_comanda(text):
             st.session_state.tracks, key=lambda x: x["BPM"], reverse=desc
         )
         return "Am sortat BPM de la mare la mic." if desc else "Am sortat BPM de la mic la mare."
-    return (
-        "Nu am recunoscut comanda. Incearca: "
-        "sorteaza dupa BPM, aranjeaza pe Camelot, aranjare armonica, goleste lista."
-    )
+    return "Nu am recunoscut comanda. Incearca: sorteaza dupa BPM, aranjeaza pe Camelot, goleste lista."
 
 
 def vocal_band_energy(y, sr, hop=512):
@@ -239,24 +237,26 @@ def bars_to_samples(bpm, bars, sr, beats_per_bar=4):
     return int(sec * sr), sec
 
 
-def eq_swap(out_seg, in_seg, sr):
+def smooth_crossfade(out_seg, in_seg):
+    """Realizează un crossfade uniform, curat, prevenind căderea bruscă de volum."""
     n = min(len(out_seg), len(in_seg))
     out_seg, in_seg = out_seg[:n], in_seg[:n]
-    fade = np.linspace(0, 1, n, dtype=np.float32)
-    y_out_hi = librosa.effects.preemphasis(out_seg, coef=0.95)
-    y_in_lo = in_seg - librosa.effects.preemphasis(in_seg, coef=0.95) * 0.35
-    mixed = (1 - fade) * y_out_hi.astype(np.float32) + fade * y_in_lo.astype(np.float32)
+    
+    # Curbă logaritmică / sinuzoidală sau liniară fină pentru un power-curve crossfade egal (egalizator de putere)
+    t = np.linspace(0, np.pi / 2, n, dtype=np.float32)
+    fade_out = np.cos(t)
+    fade_in = np.sin(t)
+    
+    mixed = out_seg * fade_out + in_seg * fade_in
     return mixed
 
 
 st.sidebar.header("Setari Mix")
 durata_def = st.sidebar.number_input("Durata tinta piese (sec):", 30, 600, 120)
-bars_xf = st.sidebar.selectbox("Crossfade (masuri):", [1, 2, 4], index=1)
+bars_xf = st.sidebar.selectbox("Crossfade (masuri):", [1, 2, 4], index=2) # 4 măsuri default
 win_frase = st.sidebar.slider("Cauta final de strofa +/- sec:", 4, 20, 12)
 fmt_out = st.sidebar.selectbox("Format:", ["WAV", "MP3 320kbps"])
-st.sidebar.caption(
-    "Durata e o tinta. Mixul muta taierea pe o bataie linistita din jurul ei."
-)
+st.sidebar.caption("Crossfade-ul pe masuri asigura trecerea lina intre piese.")
 
 st.sidebar.header("Voce")
 if st.sidebar.button("Reinregistreaza", key="reset_mic_side"):
@@ -386,7 +386,7 @@ if st.session_state.tracks:
     st.markdown("---")
     if st.button("GENEREAZA MIXUL FINAL", type="primary"):
         try:
-            with st.spinner("Caut finaluri de fraza si mixez pe masuri..."):
+            with st.spinner("Caut finaluri de fraza si mixez curat pe masuri..."):
                 sr_mix = 44100
                 final = None
                 log_rows = []
@@ -411,7 +411,7 @@ if st.session_state.tracks:
 
                     log_rows.append(
                         f"{i + 1}. {row['Piesa']}: tinta {tinta:.0f}s -> taiat la {out_t:.2f}s "
-                        f"(fade {fade_sec:.2f}s / {bars_xf} masuri)"
+                        f"(crossfade {fade_sec:.2f}s / {bars_xf} masuri)"
                     )
 
                     if final is None:
@@ -421,7 +421,8 @@ if st.session_state.tracks:
                         if fade_n < 64:
                             final = np.concatenate([final, piece])
                         else:
-                            mixed = eq_swap(final[-fade_n:], piece[:fade_n], sr_mix)
+                            # Aplicăm noul crossfade lin fără scăderi bruște
+                            mixed = smooth_crossfade(final[-fade_n:], piece[:fade_n])
                             final = np.concatenate([final[:-fade_n], mixed, piece[fade_n:]])
 
                 out_name = f"SmartMix_Result.{'mp3' if 'MP3' in fmt_out else 'wav'}"
