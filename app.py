@@ -4,17 +4,21 @@ import numpy as np
 import soundfile as sf
 import os
 import tempfile
+import unicodedata
 
-st.set_page_config(page_title="SmartMix Pro V3.8", layout="wide")
+st.set_page_config(page_title="SmartMix Pro V3.9", layout="wide")
 st.title("🎧 SmartMix Pro - Manual Arrangement Studio")
-st.caption("Analiză BPM + tonalitate (key / Camelot), sortare armonică, mix cu crossfade, export WAV/MP3.")
+st.caption("Analiză BPM + tonalitate (key / Camelot), sortare armonică, comenzi vocale (Groq Whisper), mix WAV/MP3.")
 
 if "tracks" not in st.session_state:
     st.session_state.tracks = []
+if "ultima_comanda" not in st.session_state:
+    st.session_state.ultima_comanda = ""
+if "ultimul_rezultat" not in st.session_state:
+    st.session_state.ultimul_rezultat = ""
 
 NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
-# Camelot Wheel: major = B, minor = A
 CAMELOT_MAJOR = {
     0: "8B", 1: "3B", 2: "10B", 3: "5B", 4: "12B", 5: "7B",
     6: "2B", 7: "9B", 8: "4B", 9: "11B", 10: "6B", 11: "1B",
@@ -29,7 +33,6 @@ MINOR_PROFILE = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 
 
 
 def parse_camelot(code):
-    """Returnează (număr 1-12, literă A/B) sau None."""
     if not code or code == "?":
         return None
     try:
@@ -43,7 +46,6 @@ def parse_camelot(code):
 
 
 def camelot_distance(a, b):
-    """0 = identic, 1 = vecin compatibil, 2+ = mai departe. Necunoscut = 99."""
     pa, pb = parse_camelot(a), parse_camelot(b)
     if not pa or not pb:
         return 99
@@ -80,12 +82,8 @@ def detect_key(y, sr):
             best_score, best_idx, best_mode = s_min, i, "minor"
 
     if best_mode == "major":
-        key = NOTES[best_idx]
-        camelot = CAMELOT_MAJOR[best_idx]
-    else:
-        key = NOTES[best_idx] + "m"
-        camelot = CAMELOT_MINOR[best_idx]
-    return key, camelot
+        return NOTES[best_idx], CAMELOT_MAJOR[best_idx]
+    return NOTES[best_idx] + "m", CAMELOT_MINOR[best_idx]
 
 
 def analyze_track(path):
@@ -100,7 +98,6 @@ def analyze_track(path):
 
 
 def harmonic_order(tracks):
-    """Pornește de la prima piesă și alege mereu următoarea cea mai compatibilă (key + BPM)."""
     if not tracks:
         return tracks
     remaining = tracks[:]
@@ -129,18 +126,92 @@ def save_upload(uploaded):
     return tmp.name
 
 
+def fara_diacritice(text):
+    text = unicodedata.normalize("NFD", text or "")
+    return "".join(ch for ch in text if unicodedata.category(ch) != "Mn").lower()
+
+
+def transcrie_groq(audio_bytes, filename="comanda.wav"):
+    from groq import Groq
+
+    api_key = os.environ.get("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", "")
+    if not api_key:
+        raise RuntimeError(
+            "Lipsește GROQ_API_KEY. Pune-o în variabila de mediu sau în Streamlit Secrets."
+        )
+    client = Groq(api_key=api_key)
+    transcription = client.audio.transcriptions.create(
+        file=(filename, audio_bytes),
+        model="whisper-large-v3-turbo",
+        language="ro",
+        temperature=0,
+    )
+    return (transcription.text or "").strip()
+
+
+def executa_comanda(text):
+    t = fara_diacritice(text)
+    if not st.session_state.tracks:
+        return "Nu sunt piese în listă. Analizează întâi fișierele."
+
+    if any(w in t for w in ("goleste", "sterge lista", "reseteaza")):
+        st.session_state.tracks = []
+        return "Lista a fost golită."
+
+    if any(w in t for w in ("armonic", "compatibil", "armonie")):
+        st.session_state.tracks = harmonic_order(st.session_state.tracks)
+        return "Am aranjat armonic (key + BPM)."
+
+    if any(w in t for w in ("camelot", "kamelot", "tonalitate", "tonalitat", "key", "nota")):
+        def cam_key(track):
+            p = parse_camelot(track.get("Camelot", "?"))
+            return p if p else (99, "Z")
+        st.session_state.tracks = sorted(
+            st.session_state.tracks, key=lambda x: (cam_key(x), x["BPM"])
+        )
+        return "Am sortat după Camelot / tonalitate."
+
+    if "bpm" in t or "tempo" in t:
+        desc = any(w in t for w in ("mare", "descresc", "invers", "cobor", "de sus"))
+        st.session_state.tracks = sorted(
+            st.session_state.tracks, key=lambda x: x["BPM"], reverse=desc
+        )
+        return "Am sortat BPM de la mare la mic." if desc else "Am sortat BPM de la mic la mare."
+
+    return (
+        "Nu am recunoscut comanda. Încearcă: "
+        "„sortează după BPM”, „aranjează pe Camelot”, „aranjare armonică”, „golește lista”."
+    )
+
+
 # --- SIDEBAR ---
 st.sidebar.header("🚀 Setări Mix")
 durata_def = st.sidebar.number_input("Durată standard piese (sec):", 30, 600, 120)
 cf_sec = st.sidebar.slider("Crossfade (sec):", 2, 15, 5)
 fmt_out = st.sidebar.selectbox("Format:", ["WAV", "MP3 320kbps"])
-st.sidebar.markdown(
-    "Tonalitatea e estimată din audio (chroma + profil Krumhansl). "
-    "Nu e 100% ca Mixed In Key, dar e suficientă pentru un set armonic."
-)
+
+st.sidebar.header("🎙️ Comandă vocală")
+st.sidebar.write("Ex: „sortează după BPM”, „aranjează pe Camelot”, „aranjare armonică”.")
+audio_cmd = st.sidebar.audio_input("Înregistrează comanda")
+if audio_cmd is not None and st.sidebar.button("▶ Execută comanda vocală", type="primary"):
+    try:
+        text = transcrie_groq(audio_cmd.getvalue(), filename=audio_cmd.name or "comanda.wav")
+        st.session_state.ultima_comanda = text
+        st.session_state.ultimul_rezultat = executa_comanda(text)
+        st.rerun()
+    except Exception as e:
+        st.sidebar.error(str(e))
+
+if st.session_state.ultima_comanda:
+    st.sidebar.success(f"Auzit: {st.session_state.ultima_comanda}")
+    st.sidebar.info(st.session_state.ultimul_rezultat)
 
 # --- UPLOAD ---
-files = st.file_uploader("Încarcă muzica:", type=["mp3", "wav", "ogg", "flac", "m4a"], accept_multiple_files=True)
+files = st.file_uploader(
+    "Încarcă muzica:",
+    type=["mp3", "wav", "ogg", "flac", "m4a"],
+    accept_multiple_files=True,
+)
 
 if files:
     if st.button("🔍 ANALIZEAZĂ PIESELE", type="primary"):
@@ -179,7 +250,7 @@ if files:
             progress.progress((i + 1) / len(files))
         st.rerun()
 
-# --- GESTIONARE ORDINE ---
+# --- LISTA ---
 if st.session_state.tracks:
     st.markdown("### 📋 Lista de Mixaj (Aranjează Ordinea)")
 
@@ -193,9 +264,7 @@ if st.session_state.tracks:
     if c3.button("🎹 Sortează Camelot"):
         def cam_key(t):
             p = parse_camelot(t.get("Camelot", "?"))
-            if not p:
-                return (99, "Z")
-            return p
+            return p if p else (99, "Z")
         st.session_state.tracks = sorted(st.session_state.tracks, key=lambda t: (cam_key(t), t["BPM"]))
         st.rerun()
     if c4.button("🧬 Aranjare armonică"):
@@ -205,15 +274,8 @@ if st.session_state.tracks:
         st.session_state.tracks = []
         st.rerun()
 
-    st.info(
-        "🧬 **Aranjare armonică** pornește de la piesa de pe locul 1 și alege următoarea "
-        "cu key compatibil (Camelot vecin / relativ) și BPM apropiat. "
-        "Poți muta manual cu 🔼 🔽 după."
-    )
-
     for i, track in enumerate(st.session_state.tracks):
         col_move, col_info, col_edit = st.columns([1, 4, 3])
-
         with col_move:
             if st.button("🔼", key=f"up_{i}") and i > 0:
                 st.session_state.tracks[i], st.session_state.tracks[i - 1] = (
@@ -227,16 +289,14 @@ if st.session_state.tracks:
                     st.session_state.tracks[i],
                 )
                 st.rerun()
-
         with col_info:
             st.markdown(f"**{i + 1}. {track['Piesa']}**")
             st.caption(
                 f"BPM: {track['BPM']}  |  Key: {track.get('Key', '?')}  "
-                f"({track.get('Camelot', '?')})  |  Start sugerat: {track['Start (sec)']}s"
+                f"({track.get('Camelot', '?')})  |  Start: {track['Start (sec)']}s"
             )
             if track.get("Eroare"):
                 st.warning(f"Analiză incompletă: {track['Eroare']}")
-
         with col_edit:
             new_start = st.number_input("Start (s)", value=float(track["Start (sec)"]), key=f"s_{i}", step=0.1)
             new_dur = st.number_input("Durată (s)", value=float(track["Durata (sec)"]), key=f"d_{i}", step=1.0)
@@ -249,7 +309,6 @@ if st.session_state.tracks:
             with st.spinner("Mixare profesională în curs..."):
                 sr_mix = 44100
                 final = np.array([], dtype=np.float32)
-
                 for i, row in enumerate(st.session_state.tracks):
                     src = row.get("Path") or row["Piesa"]
                     y, _ = librosa.load(
@@ -259,10 +318,9 @@ if st.session_state.tracks:
                         duration=float(row["Durata (sec)"]),
                     )
                     if y.size == 0:
-                        raise ValueError(f"Piesa goală sau start/durată invalidă: {row['Piesa']}")
+                        raise ValueError(f"Piesa goală: {row['Piesa']}")
                     y = librosa.util.normalize(y).astype(np.float32) * 0.95
                     f_len = int(cf_sec * sr_mix)
-
                     if i == 0:
                         final = y
                     else:
@@ -277,16 +335,12 @@ if st.session_state.tracks:
 
                 out_name = f"SmartMix_Result.{'mp3' if 'MP3' in fmt_out else 'wav'}"
                 if "MP3" in fmt_out:
-                    wav_tmp = "t.wav"
-                    sf.write(wav_tmp, final, sr_mix)
-                    rc = os.system(f'ffmpeg -i "{wav_tmp}" -ab 320k -y "{out_name}"')
+                    sf.write("t.wav", final, sr_mix)
+                    rc = os.system(f'ffmpeg -i "t.wav" -ab 320k -y "{out_name}"')
                     if rc != 0 or not os.path.exists(out_name):
-                        raise RuntimeError(
-                            "ffmpeg a eșuat. Instalează ffmpeg (vezi packages.txt) sau exportă WAV."
-                        )
+                        raise RuntimeError("ffmpeg a eșuat. Exportă WAV sau instalează ffmpeg.")
                 else:
                     sf.write(out_name, final, sr_mix, subtype="PCM_24")
-
                 st.success("Mix gata.")
                 st.audio(out_name)
                 with open(out_name, "rb") as f_res:
@@ -294,4 +348,4 @@ if st.session_state.tracks:
         except Exception as e:
             st.error(f"Eroare: {e}")
 else:
-    st.write("Încarcă fișiere audio și apasă **ANALIZEAZĂ PIESELE**.")
+    st.write("Încarcă fișiere audio și apasă **ANALIZEAZĂ PIESELE**. Comanda vocală e în sidebar.")
